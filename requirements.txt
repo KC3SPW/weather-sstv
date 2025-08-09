@@ -1,0 +1,7 @@
+pysstv==0.3.4
+sounddevice==0.5.2
+Pillow==10.4.0
+pyserial==3.5
+systemd-python==235
+requests==2.32.3
+numpy==2.1.2
