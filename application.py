@@ -85,6 +85,7 @@ class MartinM1(SSTV):
                     yield FREQ_FSKID_BIT1 if bit else FREQ_FSKID_BIT0, MSEC_FSKID_BIT
 
     def gen_image_tuples(self):
+        """Generate frequency-duration tuples for image data."""
         # Horizontal sync pulse
         yield from self.horizontal_sync()
         # Separator pulse
@@ -160,6 +161,7 @@ def download_image(url, timeout=10, retries=3, retry_delay=60):
 
 
 def encode_sstv_image(url, samples_per_sec=44100, bits=16):
+    """Encode an image from a URL into SSTV audio samples."""
     try:
         img, tmp_file_path = download_image(url)
         try:
@@ -176,25 +178,25 @@ def encode_sstv_image(url, samples_per_sec=44100, bits=16):
 
 
 def transmit_sstv(samples, samplerate, serial_port, baudrate=9600):
+    """Transmit SSTV audio samples as KISS frames over the serial port."""
     try:
         with serial.Serial(serial_port, baudrate, timeout=1) as ser:
-            logger.info(
-                f"Transmitting {len(samples)} raw audio samples to {serial_port} at {samplerate} Hz via KISS TNC")
+            logger.info(f"Transmitting {len(samples)} SSTV samples to {serial_port} at {samplerate} Hz via KISS TNC")
             logger.debug(f"Sample data (first 100): {samples[:100].tolist()}")
 
-            # Convert samples to bytes
+            # Convert samples to bytes (16-bit or 8-bit depending on bits parameter)
             sample_bytes = samples.tobytes()
             logger.info(f"Total sample size: {len(sample_bytes)} bytes")
 
             # KISS frame buffer
-            chunk_size = 800  # KISS frame data payload size (avoid exceeding typical TNC buffer limits)
+            chunk_size = 512  # Reduced chunk size for UV-Pro TNC compatibility
             for i in range(0, len(sample_bytes), chunk_size):
                 chunk = sample_bytes[i:i + chunk_size]
 
                 # Create KISS frame
                 kiss_frame = bytearray()
                 kiss_frame.append(KISS_FEND)  # Start of frame
-                kiss_frame.append(KISS_DATA)  # Data frame type
+                kiss_frame.append(KISS_DATA)  # Data frame type (0x00 for data)
 
                 # Escape special bytes in the chunk
                 for byte in chunk:
@@ -212,8 +214,8 @@ def transmit_sstv(samples, samplerate, serial_port, baudrate=9600):
                 ser.flush()
                 logger.debug(f"Wrote KISS frame of {len(kiss_frame)} bytes to {serial_port}")
 
-                # Small delay to prevent overwhelming the TNC
-                time.sleep(0.01)
+                # Delay to prevent overwhelming the UV-Pro's TNC buffer
+                time.sleep(0.02)  # Increased delay for stability
 
             logger.info("KISS SSTV transmission completed")
     except Exception as e:
@@ -222,6 +224,7 @@ def transmit_sstv(samples, samplerate, serial_port, baudrate=9600):
 
 
 def sstv_service(url, serial_port, interval=300):
+    """Run SSTV transmission service in a loop."""
     logger.info("Starting SSTV service")
     while True:
         try:
@@ -235,9 +238,11 @@ def sstv_service(url, serial_port, interval=300):
 
 
 def main():
+    """Parse arguments and start the SSTV service."""
     parser = argparse.ArgumentParser(description="SSTV Image Transmission Service")
     parser.add_argument('--url', default='https://example.com/image.jpg', help='URL of the image to transmit')
-    parser.add_argument('--port', default='/dev/rfcomm0', help='Serial port for KISS TNC')
+    parser.add_argument('--port', default='/dev/rfcomm0',
+                        help='Serial port for KISS TNC (e.g., /dev/rfcomm0 for Bluetooth)')
     parser.add_argument('--interval', type=int, default=300, help='Interval between transmissions in seconds')
     args = parser.parse_args()
 
