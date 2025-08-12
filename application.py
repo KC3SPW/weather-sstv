@@ -55,6 +55,35 @@ class MartinM1(SSTV):
         super().__init__(image, samples_per_sec, bits)
         self.image = image.convert('RGB').resize((self.WIDTH, self.HEIGHT))
 
+    def gen_tones(self):
+        """Generate frequency-duration tuples for the entire SSTV transmission."""
+        # VOX tone (if enabled)
+        if self.vox_enabled:
+            yield FREQ_VIS_START, MSEC_VIS_START
+            yield FREQ_VIS_START, MSEC_VIS_START
+
+        # VIS code
+        yield FREQ_VIS_START, MSEC_VIS_START  # Leader tone
+        yield FREQ_SYNC, MSEC_VIS_SYNC  # Sync pulse
+        yield FREQ_VIS_START, MSEC_VIS_START  # Leader tone
+
+        # Transmit VIS code (8 bits, LSB first)
+        vis = self.VIS_CODE
+        for i in range(8):
+            bit = (vis >> i) & 1
+            yield FREQ_VIS_BIT1 if bit else FREQ_VIS_BIT0, MSEC_VIS_BIT
+        yield FREQ_VIS_BIT0, MSEC_VIS_BIT  # Parity bit (simplified, assumes even parity)
+
+        # Image data
+        yield from self.gen_image_tuples()
+
+        # FSK ID (if enabled)
+        if hasattr(self, 'fskid_text') and self.fskid_text:
+            for char in self.fskid_text:
+                for i in range(7):  # 7-bit ASCII, LSB first
+                    bit = (ord(char) >> i) & 1
+                    yield FREQ_FSKID_BIT1 if bit else FREQ_FSKID_BIT0, MSEC_FSKID_BIT
+
     def gen_image_tuples(self):
         # Horizontal sync pulse
         yield from self.horizontal_sync()
