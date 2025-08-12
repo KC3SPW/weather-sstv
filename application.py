@@ -26,6 +26,13 @@ MSEC_VIS_SYNC = 10
 MSEC_VIS_BIT = 30
 MSEC_FSKID_BIT = 22
 
+# KISS protocol constants
+KISS_FEND = 0xC0  # Frame End
+KISS_FESC = 0xDB  # Frame Escape
+KISS_TFEND = 0xDC  # Transposed Frame End
+KISS_TFESC = 0xDD  # Transposed Frame Escape
+KISS_DATA = 0x00  # Data frame type
+
 # Configure logging to file
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +43,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('SSTVService')
+
 
 class MartinM1(SSTV):
     VIS_CODE = 44  # Martin M1 VIS code
@@ -89,9 +97,11 @@ class MartinM1(SSTV):
                 samples.append(sample_value)
         return samples
 
+
 def byte_to_freq(value):
     """Convert pixel intensity (0-255) to frequency (1500-2300 Hz)."""
     return FREQ_BLACK + FREQ_RANGE * value / 255
+
 
 def download_image(url, timeout=10, retries=3, retry_delay=60):
     """Download an image from a URL and return a PIL Image object."""
@@ -119,6 +129,7 @@ def download_image(url, timeout=10, retries=3, retry_delay=60):
                 raise
     raise Exception(f"Failed to download image after {retries} attempts")
 
+
 def encode_sstv_image(url, samples_per_sec=44100, bits=16):
     try:
         img, tmp_file_path = download_image(url)
@@ -134,29 +145,52 @@ def encode_sstv_image(url, samples_per_sec=44100, bits=16):
         logger.error(f"Error encoding SSTV image from {url}: {e}")
         raise
 
+
 def transmit_sstv(samples, samplerate, serial_port, baudrate=9600):
     try:
         with serial.Serial(serial_port, baudrate, timeout=1) as ser:
-            logger.info(f"Transmitting {len(samples)} raw audio samples to {serial_port} at {samplerate} Hz")
+            logger.info(
+                f"Transmitting {len(samples)} raw audio samples to {serial_port} at {samplerate} Hz via KISS TNC")
             logger.debug(f"Sample data (first 100): {samples[:100].tolist()}")
 
             # Convert samples to bytes
             sample_bytes = samples.tobytes()
             logger.info(f"Total sample size: {len(sample_bytes)} bytes")
 
-            # Write raw samples directly to the serial port
-            chunk_size = 1024  # Send in chunks to avoid overwhelming the TNC
+            # KISS frame buffer
+            chunk_size = 800  # KISS frame data payload size (avoid exceeding typical TNC buffer limits)
             for i in range(0, len(sample_bytes), chunk_size):
                 chunk = sample_bytes[i:i + chunk_size]
-                ser.write(chunk)
-                ser.flush()
-                time.sleep(0.01)  # Small delay to prevent buffer overflow
-                logger.debug(f"Wrote {len(chunk)} bytes to {serial_port}")
 
-            logger.info("Raw SSTV transmission completed")
+                # Create KISS frame
+                kiss_frame = bytearray()
+                kiss_frame.append(KISS_FEND)  # Start of frame
+                kiss_frame.append(KISS_DATA)  # Data frame type
+
+                # Escape special bytes in the chunk
+                for byte in chunk:
+                    if byte == KISS_FEND:
+                        kiss_frame.extend([KISS_FESC, KISS_TFEND])
+                    elif byte == KISS_FESC:
+                        kiss_frame.extend([KISS_FESC, KISS_TFESC])
+                    else:
+                        kiss_frame.append(byte)
+
+                kiss_frame.append(KISS_FEND)  # End of frame
+
+                # Write KISS frame to serial port
+                ser.write(kiss_frame)
+                ser.flush()
+                logger.debug(f"Wrote KISS frame of {len(kiss_frame)} bytes to {serial_port}")
+
+                # Small delay to prevent overwhelming the TNC
+                time.sleep(0.01)
+
+            logger.info("KISS SSTV transmission completed")
     except Exception as e:
-        logger.error(f"Error during raw SSTV transmission: {e}")
+        logger.error(f"Error during KISS SSTV transmission: {e}")
         raise
+
 
 def sstv_service(url, serial_port, interval=300):
     logger.info("Starting SSTV service")
@@ -170,6 +204,7 @@ def sstv_service(url, serial_port, interval=300):
             logger.error(f"Service error: {e}")
             time.sleep(60)  # Wait before retrying on error
 
+
 def main():
     parser = argparse.ArgumentParser(description="SSTV Image Transmission Service")
     parser.add_argument('--url', default='https://example.com/image.jpg', help='URL of the image to transmit')
@@ -178,6 +213,7 @@ def main():
     args = parser.parse_args()
 
     sstv_service(args.url, args.port, args.interval)
+
 
 if __name__ == "__main__":
     main()
