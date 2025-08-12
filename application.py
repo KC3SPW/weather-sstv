@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import sys
 import time
 import serial
 import numpy as np
@@ -11,7 +10,6 @@ import argparse
 import requests
 import tempfile
 import os
-import struct
 
 # Constants from pysstv
 FREQ_VIS_BIT1 = 1100
@@ -27,18 +25,6 @@ MSEC_VIS_START = 300
 MSEC_VIS_SYNC = 10
 MSEC_VIS_BIT = 30
 MSEC_FSKID_BIT = 22
-
-# AX.25 and KISS constants
-KISS_FEND = 0xC0  # Frame End
-KISS_FTYPE_DATA = 0x00  # Data frame type
-AX25_CONTROL = 0x03  # UI frame (Unnumbered Information)
-AX25_PID = 0xF0  # No layer 3 protocol
-AX25_MAX_PAYLOAD = 256  # Max payload size per packet
-
-# Define byte_to_freq function
-def byte_to_freq(value):
-    """Convert pixel intensity (0-255) to frequency (1500-2300 Hz)."""
-    return FREQ_BLACK + FREQ_RANGE * value / 255
 
 # Configure logging to file
 logging.basicConfig(
@@ -89,28 +75,23 @@ class MartinM1(SSTV):
             yield from self.horizontal_sync()
             yield 1462, 0.5
 
-def encode_ax25_packet(source_callsign, dest_callsign, payload):
-    """Create an AX.25 packet with the given payload."""
-    # Convert callsigns to AX.25 address format (7 bytes each: 6 chars + SSID)
-    def callsign_to_ax25(callsign, is_last=False):
-        # Pad callsign to 6 characters, uppercase
-        callsign = callsign.upper().ljust(6, ' ')
-        # Convert to bytes, shift left by 1 bit (AX.25 requirement)
-        addr = bytes(ord(c) << 1 for c in callsign)
-        # SSID byte: 0 for simplicity, set bit 0 to 1 for last address
-        ssid = 0x60 | (0x01 if is_last else 0x00)
-        return addr + bytes([ssid])
+    def gen_samples(self):
+        """Generate raw audio samples for Martin M1 SSTV."""
+        samples = []
+        phase = 0.0
+        for freq, duration in self.gen_tones():
+            n_samples = int(duration * self.samples_per_sec / 1000.0)
+            for i in range(n_samples):
+                phase_inc = 2 * np.pi * freq / self.samples_per_sec
+                sample = np.sin(phase)
+                phase = (phase + phase_inc) % (2 * np.pi)
+                sample_value = int(sample * ((1 << (self.bits - 1)) - 1))
+                samples.append(sample_value)
+        return samples
 
-    # Build AX.25 frame
-    dest_addr = callsign_to_ax25(dest_callsign)
-    src_addr = callsign_to_ax25(source_callsign, is_last=True)
-    frame = dest_addr + src_addr + bytes([AX25_CONTROL, AX25_PID]) + payload
-
-    # Build KISS frame
-    kiss_frame = bytes([KISS_FEND, KISS_FTYPE_DATA]) + frame + bytes([KISS_FEND])
-    # Escape FEND (0xC0) and FESC (0xDB) in the frame (excluding delimiters)
-    kiss_frame = kiss_frame[0:2] + kiss_frame[2:-1].replace(b'\xC0', b'\xDB\xDC').replace(b'\xDB', b'\xDB\xDD') + kiss_frame[-1:]
-    return kiss_frame
+def byte_to_freq(value):
+    """Convert pixel intensity (0-255) to frequency (1500-2300 Hz)."""
+    return FREQ_BLACK + FREQ_RANGE * value / 255
 
 def download_image(url, timeout=10, retries=3, retry_delay=60):
     """Download an image from a URL and return a PIL Image object."""
@@ -153,40 +134,36 @@ def encode_sstv_image(url, samples_per_sec=44100, bits=16):
         logger.error(f"Error encoding SSTV image from {url}: {e}")
         raise
 
-def transmit_sstv(samples, samplerate, serial_port, source_callsign="N0CALL", dest_callsign="CQ", baudrate=9600):
+def transmit_sstv(samples, samplerate, serial_port, baudrate=9600):
     try:
         with serial.Serial(serial_port, baudrate, timeout=1) as ser:
-            # Log sample information
-            logger.info(f"Encoding {len(samples)} audio samples into AX.25 packets for {serial_port} at {samplerate} Hz")
-            # Log a subset of samples for debugging (first 100 samples)
+            logger.info(f"Transmitting {len(samples)} raw audio samples to {serial_port} at {samplerate} Hz")
             logger.debug(f"Sample data (first 100): {samples[:100].tolist()}")
 
             # Convert samples to bytes
             sample_bytes = samples.tobytes()
-            logger.info(f"Total payload size: {len(sample_bytes)} bytes")
+            logger.info(f"Total sample size: {len(sample_bytes)} bytes")
 
-            # Split into AX.25 packets
-            chunk_size = AX25_MAX_PAYLOAD
+            # Write raw samples directly to the serial port
+            chunk_size = 1024  # Send in chunks to avoid overwhelming the TNC
             for i in range(0, len(sample_bytes), chunk_size):
                 chunk = sample_bytes[i:i + chunk_size]
-                packet = encode_ax25_packet(source_callsign, dest_callsign, chunk)
-                logger.debug(f"Sending AX.25 packet with {len(chunk)} bytes payload (total packet size: {len(packet)})")
-                ser.write(packet)
+                ser.write(chunk)
                 ser.flush()
-                time.sleep(0.02)  # Delay to prevent TNC buffer overflow
-                logger.debug(f"Wrote AX.25 packet to {serial_port}")
+                time.sleep(0.01)  # Small delay to prevent buffer overflow
+                logger.debug(f"Wrote {len(chunk)} bytes to {serial_port}")
 
-            logger.info("SSTV transmission completed")
+            logger.info("Raw SSTV transmission completed")
     except Exception as e:
-        logger.error(f"Error during SSTV transmission: {e}")
+        logger.error(f"Error during raw SSTV transmission: {e}")
         raise
 
-def sstv_service(url, serial_port, source_callsign="N0CALL", dest_callsign="CQ", interval=300):
+def sstv_service(url, serial_port, interval=300):
     logger.info("Starting SSTV service")
     while True:
         try:
             samples, samplerate = encode_sstv_image(url)
-            transmit_sstv(samples, samplerate, serial_port, source_callsign, dest_callsign)
+            transmit_sstv(samples, samplerate, serial_port)
             logger.info(f"Waiting {interval} seconds before next transmission")
             time.sleep(interval)
         except Exception as e:
@@ -197,12 +174,10 @@ def main():
     parser = argparse.ArgumentParser(description="SSTV Image Transmission Service")
     parser.add_argument('--url', default='https://example.com/image.jpg', help='URL of the image to transmit')
     parser.add_argument('--port', default='/dev/rfcomm0', help='Serial port for KISS TNC')
-    parser.add_argument('--source-callsign', default='N0CALL', help='Source callsign for AX.25 packets')
-    parser.add_argument('--dest-callsign', default='CQ', help='Destination callsign for AX.25 packets')
     parser.add_argument('--interval', type=int, default=300, help='Interval between transmissions in seconds')
     args = parser.parse_args()
 
-    sstv_service(args.url, args.port, args.source_callsign, args.dest_callsign, args.interval)
+    sstv_service(args.url, args.port, args.interval)
 
 if __name__ == "__main__":
     main()
